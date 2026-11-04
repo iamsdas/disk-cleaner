@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html data-fused-theme="shell">
+<head>
+<meta charset="utf-8" />
+<meta name="fused-app" />
+<meta name="fused-app-id" content="disk-cleaner-f247adb0" />
+<meta name="fused-api-version" content="1" />
+<title>Disk Cleaner</title>
+<style>
+  /* Neutrals and status colours follow the fused-render shell's live palette
+     (light/dark and colour preset) via its --fused-* tokens; the literals are
+     fallbacks for a standalone page. The blue ramp is data colour, kept fixed. */
+  :root {
+    color-scheme: dark;
+    --bg: var(--fused-bg, #0d0d0d);
+    --surface: var(--fused-bg-panel, #1a1a19);
+    --text: var(--fused-fg, #ffffff);
+    --text-2: var(--fused-fg-muted, #c3c2b7);
+    --muted: var(--fused-fg-faint, #898781);
+    --line: var(--fused-border, #2c2c2a);
+    --baseline: #383835;
+    --ring: rgba(255,255,255,0.10);
+    --fill: #3987e5;        /* blue 400 — sequential hue, magnitude */
+    --fill-soft: #184f95;   /* blue 600 — darkest step still ≥2:1 on dark */
+    /* Text steps for the share% column: same one-hue ramp as the bar fill,
+       going lighter (more contrast on a dark surface) as the share grows. */
+    --share-low: var(--muted);
+    --share-mid: #5598e7;   /* blue 350 */
+    --share-high: #9ec5f4;  /* blue 200 */
+    /* Space you'd get back: the hero's gauge segment, "after" figure and CTA. */
+    --gain: var(--fill);
+    --gain-text: var(--share-high);
+    --good: var(--fused-success, #0ca30c);
+    --warning: var(--fused-warning, #fab219);
+    --serious: #ec835a;
+    --critical: var(--fused-error, #d03b3b);
+    --hover: var(--fused-sel, rgba(255,255,255,0.05));
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: var(--fused-bg, #f9f9f7);
+    --surface: var(--fused-bg-panel, #fcfcfb);
+    --text: var(--fused-fg, #0b0b0b);
+    --text-2: var(--fused-fg-muted, #52514e);
+    --muted: var(--fused-fg-faint, #898781);
+    --line: var(--fused-border, #e1e0d9);
+    --baseline: #c3c2b7;
+    --ring: rgba(11,11,11,0.10);
+    --fill: #2a78d6;        /* blue 450 */
+    --fill-soft: #86b6ef;   /* blue 250 — the lightest step that still clears
+                               2:1 on a light surface (ordinal ramp floor) */
+    /* Text steps for the share% column: same one-hue ramp as the bar fill,
+       going darker (more contrast on a light surface) as the share grows. */
+    --share-low: var(--muted);
+    --share-mid: #256abf;   /* blue 500 */
+    --share-high: #184f95;  /* blue 600 */
+    --gain: var(--fill);
+    --gain-text: var(--share-mid);
+    --good: var(--fused-success, #0ca30c);
+    --warning: var(--fused-warning, #fab219);
+    --serious: #ec835a;
+    --critical: var(--fused-error, #d03b3b);
+    --hover: var(--fused-sel, rgba(11,11,11,0.04));
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+    color: var(--text);
+    background: var(--bg);
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 24px 64px; }
+
+  /* The viewport scrollbar gutter paints white in the embedded pane, so the
+     body is the scroll container instead, with a thin themed scrollbar. */
+  html { height: 100%; overflow: hidden; }
+  body { height: 100%; overflow: auto; }
+  @supports not selector(::-webkit-scrollbar) {
+    * { scrollbar-color: var(--baseline) transparent; scrollbar-width: thin; }
+  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; background: transparent; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--baseline); border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+  ::-webkit-scrollbar-corner { background: transparent; }
+
+  /* ---- tabs ---- */
+  nav { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 22px; }
+  nav button {
+    appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
+    color: var(--text-2); font: inherit; padding: 8px 12px; cursor: pointer; margin-bottom: -1px;
+  }
+  nav button:hover { color: var(--text); background: var(--hover); }
+  nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--fill); }
+  /* Narrow: Overview only — no tab bar, no links into Cleanup. */
+  @media (max-width: 640px) {
+    nav, [data-tab-go], .note:has(> [data-tab-go]:only-child), .reassure { display: none; }
+  }
+
+  /* ---- cards ---- */
+  .card {
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 12px;
+    padding: 20px 22px; margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; font-weight: 600; margin: 0 0 3px; }
+  .card .hint { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  .card.loading { display: flex; align-items: center; gap: 10px; color: var(--text-2); }
+
+  /* ---- spinner ---- */
+  .spinner {
+    width: 15px; height: 15px; border-radius: 50%; flex: none;
+    border: 2px solid var(--baseline); border-top-color: var(--fill);
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- hero: the one number that matters, and the one action ---- */
+  .hero { padding: 40px 48px 32px; border-radius: 16px; text-align: center; margin-bottom: 28px; }
+  .hero-num {
+    font-size: 76px; font-weight: 600; letter-spacing: -0.03em; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .hero-num .unit { font-size: 30px; font-weight: 500; color: var(--text-2); margin-left: 6px; letter-spacing: 0; }
+  .hero-num.pending { color: var(--muted); }
+  .hero-sub { color: var(--text-2); font-size: 17px; margin: 14px 0 28px; }
+  .gauge {
+    height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; display: flex;
+  }
+  .gauge > span { display: block; height: 100%; }
+  .gauge .used { background: var(--baseline); }
+  .gauge .gain { background: var(--gain); }
+  .gauge-legend {
+    display: flex; justify-content: space-between; gap: 18px; margin-top: 10px;
+    color: var(--muted); font-size: 13px; text-align: left;
+  }
+  .gauge-legend strong { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; margin-left: 6px; }
+  .gauge-legend .after { color: var(--gain-text); font-weight: 600; margin-left: 0; }
+  .gauge-legend .arrow { margin: 0 6px; }
+  button.btn.cta {
+    margin-top: 28px; padding: 11px 30px; border-radius: 999px; font-size: 16px; font-weight: 600;
+    background: var(--gain); border-color: var(--gain); color: #fff;
+  }
+  button.btn.cta:hover:not(:disabled) { filter: brightness(1.08); background: var(--gain); }
+  .reassure { color: var(--gain-text); font-size: 13px; font-weight: 500; margin: 16px 0 0; }
+  .hero-meta { color: var(--muted); font-size: 12px; margin: 20px 0 0; }
+
+  /* ---- ranked bar rows ---- */
+  .rows { border-top: 1px solid var(--line); }
+  .row {
+    display: grid; grid-template-columns: 18px 1fr 120px 72px 46px;
+    align-items: center; gap: 12px; padding: 10px 6px;
+    border-bottom: 1px solid var(--line);
+  }
+  .row:hover { background: var(--hover); }
+  .row .icon { color: var(--muted); text-align: center; font-size: 11px; }
+  .row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .name .meta { color: var(--muted); font-size: 12px; margin-left: 8px; }
+  .row .bar { height: 6px; background: var(--baseline); border-radius: 4px; overflow: hidden; }
+  .row .bar > span { display: block; height: 100%; background: var(--fill); border-radius: 4px; }
+  .row .size, .row .share {
+    text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .row .size { color: var(--text-2); }
+  .row .share { font-weight: 600; }
+  .row.dim .name, .row.dim .size, .row.dim .share { color: var(--muted); font-weight: 400; }
+
+  /* ---- cleanup list ---- */
+  .group-title {
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); margin: 22px 0 6px;
+  }
+  .crow {
+    display: grid; grid-template-columns: 20px 1fr 84px 104px;
+    align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid var(--line);
+  }
+  .crow:hover { background: var(--hover); }
+  .crow label { display: contents; cursor: pointer; }
+  .crow input { margin: 0; accent-color: var(--fill); }
+  .crow .name { min-width: 0; }
+  .crow .size { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); white-space: nowrap; }
+  .crow .files { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .crow.missing .size { font-size: 12px; }
+  .crow .desc {
+    color: var(--muted); font-size: 12px; margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .crow.missing { opacity: .45; }
+  .risk {
+    display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted);
+    margin-left: 8px; white-space: nowrap;
+  }
+  .risk .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+  /* ---- action bar ---- */
+  .actions {
+    position: sticky; bottom: 0; margin-top: 18px; padding: 12px 14px;
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 8px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .actions .selected { font-weight: 600; }
+  .spacer { flex: 1; }
+  .action-info {
+    position: relative; color: var(--muted); font-size: 15px; line-height: 1;
+    cursor: help; outline: none;
+  }
+  .action-info:hover, .action-info:focus-visible { color: var(--fill); }
+  .action-info .tip {
+    position: absolute; bottom: calc(100% + 10px); right: -8px; width: 280px;
+    padding: 9px 11px; border-radius: 6px; border: 1px solid var(--ring);
+    background: var(--surface); color: var(--text-2); box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    font-size: 12px; line-height: 1.45; text-align: left;
+    opacity: 0; visibility: hidden; transition: opacity .12s; pointer-events: none; z-index: 5;
+  }
+  .action-info:hover .tip, .action-info:focus-visible .tip { opacity: 1; visibility: visible; }
+  .action-info .tip strong { color: var(--text); font-weight: 600; }
+  button.btn {
+    appearance: none; font: inherit; padding: 6px 13px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--baseline); background: transparent; color: var(--text);
+  }
+  button.btn:hover:not(:disabled) { background: var(--hover); }
+  button.btn.primary { background: var(--fill); border-color: var(--fill); color: #fff; }
+  button.btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--fill); }
+  button.btn.danger { border-color: var(--critical); color: var(--critical); }
+  button.btn:disabled { opacity: .45; cursor: default; }
+  .link {
+    appearance: none; border: 0; background: none; color: var(--fill);
+    font: inherit; cursor: pointer; padding: 0;
+  }
+
+  .note { color: var(--muted); font-size: 13px; margin: 14px 0 0; }
+  .banner {
+    border: 1px solid var(--ring); border-left: 3px solid var(--fill);
+    background: var(--surface); border-radius: 6px; padding: 10px 12px; margin-bottom: 14px;
+    color: var(--text-2); font-size: 12px;
+  }
+  .banner.error { border-left-color: var(--critical); }
+  .banner.done { border-left-color: var(--good); }
+  .banner strong { color: var(--text); }
+  code {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; color: inherit;
+  }
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+  table.data th, table.data td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  table.data th { color: var(--muted); font-weight: 500; }
+  table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 12px; }
+
+  /* ---- confirm modal (native confirm() is blocked inside the sandboxed
+     preview iframe, so this replaces it) ---- */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 100;
+  }
+  .modal-overlay[hidden] { display: none; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
+    max-width: 480px; width: 100%; padding: 18px 20px; max-height: 80vh; overflow: auto;
+  }
+  .modal h3 { margin: 0 0 10px; font-size: 15px; }
+  .modal pre {
+    font-family: inherit; font-size: 13px; color: var(--text-2); white-space: pre-wrap;
+    margin: 0 0 16px;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* ---- progress popover ---- */
+  .progress-track {
+    height: 8px; border-radius: 4px; background: var(--baseline); overflow: hidden; margin: 4px 0 10px;
+  }
+  .progress-fill {
+    display: block; height: 100%; background: var(--fill); border-radius: 4px;
+    transition: width .25s ease; width: 0%;
+  }
+  .progress-detail {
+    color: var(--text-2); font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .progress-hint { color: var(--text-2); font-size: 12px; margin: 12px 0 16px; }
+  .hero .progress-track { margin: 0 0 12px; }
+  .hero .progress-detail { text-align: center; }
+
+  /* ---- duplicate sets: one expandable row per set of identical files ---- */
+  details.dset { border-bottom: 1px solid var(--line); }
+  details.dset:last-of-type { border-bottom: 0; }
+  details.dset > summary {
+    list-style: none; display: grid; grid-template-columns: 18px 1fr 120px 72px; gap: 12px;
+    align-items: center; padding: 10px 6px; margin: 0; color: var(--text); font-size: 14px;
+  }
+  details.dset > summary::-webkit-details-marker { display: none; }
+  details.dset > summary:hover { background: var(--hover); }
+  details.dset .icon { color: var(--muted); transition: transform .15s ease; }
+  details.dset[open] .icon { transform: rotate(90deg); }
+  details.dset .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  details.dset .name .meta { display: block; color: var(--muted); font-size: 12px; }
+  details.dset .each { color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+  details.dset .size { text-align: right; font-variant-numeric: tabular-nums; }
+  details.dset ul { list-style: none; margin: 0 0 10px 36px; padding: 0; }
+  details.dset li {
+    font-size: 12px; color: var(--text-2); padding: 3px 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  details.dset li .shared { color: var(--muted); }
+  /* Compact view: overrides for the rules above, so they must come last. */
+  @media (max-width: 640px) {
+    main { padding: 8px 8px 16px; }
+    .card { padding: 14px 14px; margin-bottom: 10px; border-radius: 10px; }
+    .hero { padding: 22px 16px 18px; margin-bottom: 10px; }
+    .hero-num { font-size: 60px; }
+    .hero-sub { font-size: 15px; margin-bottom: 22px; }
+    .row { grid-template-columns: 14px 1fr 48px 64px 40px; gap: 8px; }
+    .row .name .meta { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="modal-overlay" id="confirmOverlay" hidden>
+  <div class="modal">
+    <h3 id="confirmTitle"></h3>
+    <pre id="confirmBody"></pre>
+    <div class="modal-actions">
+      <button class="btn" id="confirmCancel">Cancel</button>
+      <button class="btn danger" id="confirmOk"></button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="progressOverlay" hidden>
+  <div class="modal">
+    <h3 id="progressTitle"></h3>
+    <div class="progress-track"><span class="progress-fill" id="progressFill"></span></div>
+    <div class="progress-detail" id="progressDetail"></div>
+    <p class="progress-hint">Runs in the background — you can leave this page. Progress stays in the activity panel.</p>
+    <div class="modal-actions">
+      <button class="btn" id="progressCancel">Stop</button>
+      <button class="btn primary" id="progressHide">Keep running in background</button>
+    </div>
+  </div>
+</div>
+<main>
+  <nav id="tabs" role="tablist">
+    <button role="tab" data-tab="overview">Overview</button>
+    <button role="tab" data-tab="clean">Cleanup</button>
+    <button role="tab" data-tab="dupes">Duplicates</button>
+  </nav>
+
+  <section id="panel">Loading…</section>
+</main>
+
+<script>
+  const RISK = {
+    safe:     { color: "var(--good)",     label: "Safe" },
+    moderate: { color: "var(--warning)",  label: "Rebuilds" },
+    review:   { color: "var(--serious)",  label: "Review" },
+  };
+
+  const panel = document.getElementById("panel");
+
+  // ---- state (params are the state) ---------------------------------------
+  // Narrow panes only get the Overview; the tab param is left alone so the
+  // Cleanup tab comes back when there's room again.
+  const narrow = matchMedia("(max-width: 640px)");
+  const PREVIEW = isPreview();
+  const P = {
+    tab: () => narrow.matches ? "overview" : fused.params.get("tab") || "overview",
+    sel: () => (fused.params.get("sel") || "").split(",").filter(Boolean),
+  };
+  const setParam = (k, v) => fused.params.set(k, String(v));
+
+  // ---- formatting ---------------------------------------------------------
+  function bytes(n) {
+    if (!n) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)) + " " + units[i];
+  }
+  function bytesParts(n) {
+    const s = bytes(n).split(" ");
+    return { value: s[0], unit: s[1] };
+  }
+  function ago(seconds) {
+    if (seconds < 60) return "just now";
+    if (seconds < 3600) return Math.round(seconds / 60) + " min ago";
+    return Math.round(seconds / 3600) + " h ago";
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  // window.confirm() is blocked inside the sandboxed preview iframe (it
+  // silently returns false instead of showing a dialog, with no error) — an
+  // in-page modal is the only reliable way to ask before something destructive.
+  function showConfirm(title, body, okLabel) {
+    const overlay = document.getElementById("confirmOverlay");
+    const okBtn = document.getElementById("confirmOk");
+    const cancelBtn = document.getElementById("confirmCancel");
+    document.getElementById("confirmTitle").textContent = title;
+    document.getElementById("confirmBody").textContent = body;
+    okBtn.textContent = okLabel;
+    overlay.hidden = false;
+    return new Promise(resolve => {
+      function done(result) {
+        overlay.hidden = true;
+        okBtn.removeEventListener("click", onOk);
+        cancelBtn.removeEventListener("click", onCancel);
+        overlay.removeEventListener("click", onOverlay);
+        resolve(result);
+      }
+      function onOk() { done(true); }
+      function onCancel() { done(false); }
+      function onOverlay(e) { if (e.target === overlay) done(false); }
+      okBtn.addEventListener("click", onOk);
+      cancelBtn.addEventListener("click", onCancel);
+      overlay.addEventListener("click", onOverlay);
+    });
+  }
+
+  // A determinate progress popover for the background clean job — sits over
+  // the (still-visible) cleanup list. "Keep running" only hides it; "Stop"
+  // asks the worker to stop between items.
+  function showProgress(title) {
+    const stop = document.getElementById("progressCancel");
+    stop.disabled = false;
+    stop.textContent = "Stop";
+    document.getElementById("progressTitle").textContent = title;
+    document.getElementById("progressFill").style.width = "0%";
+    document.getElementById("progressDetail").textContent = "";
+    document.getElementById("progressOverlay").hidden = false;
+  }
+  function updateProgress(pct, detail) {
+    document.getElementById("progressFill").style.width = Math.max(0, Math.min(100, pct)) + "%";
+    document.getElementById("progressDetail").textContent = detail;
+  }
+  function hideProgress() {
+    document.getElementById("progressOverlay").hidden = true;
+  }
+
+  function loadingCard(text) {
+    return `<div class="card loading"><span class="spinner"></span>${esc(text)}</div>`;
+  }
+
+  // The Overview hero: one number (caches Cleanup can free, plus extra copies
+  // from the last duplicate scan), a gauge showing free space now → after,
+  // and the action that gets you there.
+  function hero(volume, caches, dupes) {
+    const dup = dupes ? dupes.savings : 0;
+    const gain = caches ? Math.min(caches.reclaimable + dup, volume.used) : 0;
+    const sub = !dup ? "is taken up by caches you can safely clear."
+      : caches && caches.reclaimable > 0
+        ? `could come back: ${bytes(caches.reclaimable)} of caches you can safely clear and ${bytes(dup)} of duplicate files.`
+        : "is taken up by extra copies of the same files.";
+    const after = volume.free + gain;
+    const pct = n => (n / (volume.total || 1) * 100).toFixed(2);
+    const p = bytesParts(gain);
+    const number = !caches
+      ? `<div class="hero-num pending">…</div><p class="hero-sub">Measuring caches you can safely clear…</p>`
+      : gain > 0
+        ? `<div class="hero-num">${p.value}<span class="unit">${p.unit}</span></div>
+           <p class="hero-sub">${sub}</p>`
+        : `<div class="hero-num">${bytesParts(volume.free).value}<span class="unit">${bytesParts(volume.free).unit}</span></div>
+           <p class="hero-sub">free. No caches worth clearing right now.</p>`;
+    return `<div class="card hero">
+        ${number}
+        <div class="gauge" role="img"
+          aria-label="${bytes(volume.free)} free of ${bytes(volume.total)}${gain ? `, ${bytes(after)} after cleanup` : ""}">
+          <span class="used" style="width:${pct(volume.used - gain)}%"></span>
+          <span class="gain" style="width:${pct(gain)}%"></span>
+        </div>
+        <div class="gauge-legend">
+          <span>Free space<strong>${bytes(volume.free)}</strong>${gain > 0
+            ? `<span class="arrow">→</span><strong class="after">${bytes(after)}</strong>` : ""}</span>
+          <span>of ${bytes(volume.total)}</span>
+        </div>
+        ${caches && caches.reclaimable > 0 ? `<button class="btn cta" data-tab-go="clean">Review ${bytes(caches.reclaimable)} of caches</button>
+          <p class="reassure">Only caches apps rebuild on their own. Nothing is touched until you pick it.</p>` : ""}
+        ${dup > 0 ? `<p class="note"><button class="link" data-tab-go="dupes">See the ${bytes(dup)} of duplicates →</button></p>` : ""}
+      </div>`;
+  }
+
+  // opts.total is the denominator for the share column — pass the whole
+  // dataset's total when `items` is only the top slice, or the shares lie.
+  function barRows(items, opts) {
+    const max = Math.max(1, ...items.map(i => i.size));
+    const total = opts.total || items.reduce((a, i) => a + i.size, 0) || 1;
+    return `<div class="rows">` + items.map((it) => {
+      const share = Math.round(it.size / total * 100);
+      const meta = it.files ? it.files.toLocaleString() + " " + (opts.unit || "files") : "empty";
+      return `<div class="row ${it.size ? "" : "dim"}" title="${esc(it.path)}">
+          <span class="icon">▸</span>
+          <span class="name">${esc(it.name)}<span class="meta">${meta}</span></span>
+          <span class="bar"><span style="width:${Math.max(2, it.size / max * 100)}%"></span></span>
+          <span class="size">${bytes(it.size)}</span>
+          <span class="share" style="color:${shareColor(share)}">${share}%</span>
+        </div>`;
+    }).join("") + `</div>`;
+  }
+
+  // Known-size items first (biggest first), pending ones after (alphabetical)
+  // — so a folder settles into rank as soon as its size lands instead of
+  // jumping around the list on every update.
+  function sortChildren(items) {
+    return [...items].sort((a, b) => {
+      if (a.pending && b.pending) return a.name.localeCompare(b.name);
+      if (a.pending) return 1;
+      if (b.pending) return -1;
+      return b.size - a.size;
+    });
+  }
+
+  // Lists `path` instantly via scan.py, then sizes each pending directory
+  // with its own concurrent call to size_dir.py — capped so a folder with
+  // dozens of children doesn't spawn dozens of subprocesses at once — so
+  // the Overview's first paint happens in well under a second and the rest
+  // fill in as they finish, instead of blocking on the slowest folder in
+  // the whole home directory.
+  async function scanProgressive(path, onUpdate, opts) {
+    const refresh = !!(opts && opts.refresh);
+    const frame = await fused.runPython("./scan.py", { path });
+    onUpdate(frame, false);
+
+    // The app-card preview renders this page unprompted, so it shows only
+    // sizes scan.py already had cached and never starts a walk.
+    const pending = PREVIEW ? [] : frame.children.filter(c => c.pending);
+    const CONCURRENCY = 6;
+    let cursor = 0;
+    async function worker() {
+      while (cursor < pending.length) {
+        const child = pending[cursor++];
+        try {
+          const sized = await fused.runPython("./size_dir.py",
+            { path: child.path, refresh: String(refresh) }, { key: child.path });
+          Object.assign(child, {
+            size: sized.size, files: sized.files, truncated: sized.truncated, pending: false,
+          });
+        } catch (err) {
+          Object.assign(child, { size: 0, files: 0, truncated: false, pending: false, error: true });
+        }
+        onUpdate(frame, false);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length) }, worker));
+    onUpdate(frame, true);
+    return frame;
+  }
+
+  // Same one-hue ramp as the bar fill — a bigger share of the total reads as
+  // a stronger step of that ramp, never a different hue or a status color.
+  function shareColor(share) {
+    if (share >= 25) return "var(--share-high)";
+    if (share >= 8) return "var(--share-mid)";
+    return "var(--share-low)";
+  }
+
+  // ---- overview ----------------------------------------------------------
+  // The volume + folders card paints as soon as scan.py's instant listing
+  // lands, then fills in sizes as size_dir.py calls resolve. The caches card
+  // is independent (a separate, still-blocking call) and shows its own
+  // loading state until it resolves, so a slow cache scan never holds up the
+  // now-fast folder view.
+  async function renderOverview() {
+    panel.innerHTML = `<div class="card">Listing your home directory…</div>`;
+    let frame = null;
+    let caches = null;
+    let dupes = null;
+
+    function paint() {
+      const volCard = frame ? hero(frame.volume, caches, dupes) : loadingCard("Loading volume info…");
+
+      let foldersCard = `<div class="card">Listing your home directory…</div>`;
+      if (frame) {
+        const totalKnown = frame.children.reduce((a, c) => a + (c.size || 0), 0);
+        const pendingCount = PREVIEW ? 0 : frame.children.filter(c => c.pending).length;
+        foldersCard = `
+          <div class="card">
+            <h2>Biggest folders in your home directory</h2>
+            <p class="hint">${esc(frame.path)} · ${bytes(totalKnown)} so far${pendingCount ? ` · sizing ${pendingCount} more…` : ""}</p>
+            ${barRows(sortChildren(frame.children).filter(c => !c.pending && c.size > 0).slice(0, 8),
+              { navigate: false, total: totalKnown })}
+          </div>`;
+      }
+
+      const cachesCard = caches ? `
+        <div class="card">
+          <h2>Biggest caches</h2>
+          <p class="hint">${bytes(caches.total)} across ${caches.entries.filter(e => e.exists).length} locations</p>
+          ${barRows(caches.entries.filter(e => e.exists && e.size > 0).slice(0, 6).map(e => ({ ...e, is_dir: true })),
+            { navigate: false, total: caches.total })}
+          <p class="note"><button class="link" data-tab-go="clean">Select what to clean →</button></p>
+        </div>` : loadingCard("Measuring caches…");
+
+      panel.innerHTML = volCard + foldersCard + cachesCard;
+    }
+
+    await Promise.all([
+      scanProgressive("~", f => { frame = f; paint(); }),
+      fused.runPython("./caches.py", PREVIEW ? { cached_only: "true" } : {})
+        .then(c => { if (!c.none) { caches = c; paint(); } }),
+      // Only a finished earlier scan counts; this tab never starts one.
+      dupesResult().then(d => { if (!d.none && d.savings > 0) { dupes = d; paint(); } }).catch(() => {}),
+    ]);
+  }
+
+  // ---- cleanup -----------------------------------------------------------
+  // A full rebuild replaces every checkbox's DOM node — do that only when
+  // the underlying data changes (first visit, Rescan, after a clean). A
+  // checkbox click only changes `sel`, so those re-renders patch the
+  // existing checkboxes/action bar in place instead, which is what actually
+  // stops the whole list flickering on every click.
+  let lastResult = null;
+  let cleanData = null;
+
+  function selectionTotals(data) {
+    const sel = new Set(P.sel());
+    const selEntries = data.entries.filter(e => sel.has(e.id) && e.exists);
+    // A nested entry's bytes already live inside its ancestor's size — if
+    // both ended up selected, only count them once so the total shown here
+    // matches what actually gets freed.
+    const selBytes = selEntries
+      .filter(e => !(e.nested_under && sel.has(e.nested_under)))
+      .reduce((a, e) => a + e.size, 0);
+    return { sel, selEntries, selBytes };
+  }
+
+  function buildCleanDom(data) {
+    const byId = {};
+    data.entries.forEach(e => { byId[e.id] = e; });
+    const groups = {};
+    data.entries.forEach(e => { (groups[e.group] = groups[e.group] || []).push(e); });
+    const { sel, selEntries, selBytes } = selectionTotals(data);
+
+    const groupHtml = Object.keys(groups).map(g => {
+      const rows = groups[g].map(e => {
+        const risk = RISK[e.risk];
+        const nestNote = e.nested_under && byId[e.nested_under]
+          ? ` · counted inside “${esc(byId[e.nested_under].name)}”` : "";
+        return `<div class="crow ${e.exists ? "" : "missing"}">
+          <label>
+            <input type="checkbox" data-id="${e.id}" ${sel.has(e.id) ? "checked" : ""}
+                   ${e.exists && e.size ? "" : "disabled"}>
+            <span class="name">
+              <span>${esc(e.name)}<span class="risk"><i class="dot" style="background:${risk.color}"></i>${risk.label}</span></span>
+              <div class="desc">${esc(e.desc)} · <code>${esc(e.path)}</code>${nestNote}</div>
+            </span>
+            <span class="size">${e.exists ? bytes(e.size) : "not present"}</span>
+            <span class="files">${e.exists && e.files ? e.files.toLocaleString() + " files" : ""}</span>
+          </label>
+        </div>`;
+      }).join("");
+      return `<div class="group-title">${esc(g)}</div>${rows}`;
+    }).join("");
+
+    panel.innerHTML = `
+      ${lastResult ? resultBanner(lastResult) : ""}
+      <div class="card">
+        <h2>Cache locations</h2>
+        <p class="hint">${data.cached ? "Sizes from cache, " + ago(data.age) + " · " : ""}
+          ${bytes(data.total)} total, ${bytes(data.reclaimable)} outside the “Review” group ·
+          <button class="link" data-refresh-caches="1">Rescan</button></p>
+        ${groupHtml}
+        <p class="note">
+          <button class="link" data-select="safe">Select safe</button> ·
+          <button class="link" data-select="all">Select all present</button> ·
+          <button class="link" data-select="none">Clear selection</button>
+        </p>
+      </div>
+      <div class="actions">
+        <span class="selected">${selEntries.length} selected · ${bytes(selBytes)}</span>
+        <span class="spacer"></span>
+        <span class="action-info" tabindex="0" aria-describedby="actionInfoTip">ⓘ
+          <span class="tip" id="actionInfoTip" role="tooltip"><strong>Move to Trash</strong> is reversible until you empty the Trash.
+          <strong>Delete permanently</strong> frees space now and can't be undone.
+          Only the locations listed here can ever be touched.</span></span>
+        <button class="btn primary" data-clean="trash" ${selEntries.length ? "" : "disabled"}>Move to Trash</button>
+        <button class="btn danger" data-clean="delete" ${selEntries.length ? "" : "disabled"}>Delete permanently</button>
+      </div>`;
+  }
+
+  // Sync checkbox states (a quick-select button can check several at once)
+  // and the action bar's count/buttons — no innerHTML writes, so nothing
+  // that's already on screen gets torn down and rebuilt.
+  function patchCleanSelection(data) {
+    const { sel, selEntries, selBytes } = selectionTotals(data);
+    panel.querySelectorAll("input[data-id]").forEach(cb => {
+      cb.checked = sel.has(cb.dataset.id);
+    });
+    const label = panel.querySelector(".actions .selected");
+    if (label) label.textContent = `${selEntries.length} selected · ${bytes(selBytes)}`;
+    panel.querySelectorAll("[data-clean]").forEach(btn => {
+      btn.disabled = !selEntries.length;
+    });
+  }
+
+  async function renderClean(force) {
+    if (!cleanData || force) {
+      panel.innerHTML = loadingCard("Measuring cache locations…");
+      cleanData = await fused.runPython("./caches.py", {});
+      takePendingResult();
+      buildCleanDom(cleanData);
+    } else {
+      patchCleanSelection(cleanData);
+    }
+  }
+
+  function resultBanner(res) {
+    const errs = res.errors.length
+      ? `<details><summary>${res.errors.length} item(s) could not be removed</summary>
+           <table class="data">${res.errors.slice(0, 40).map(e => `<tr><td>${esc(e)}</td></tr>`).join("")}</table>
+         </details>`
+      : "";
+    return `<div class="banner done">
+      <strong>${res.mode === "trash" ? "Moved to Trash" : "Deleted"}: ${bytes(res.freed)}</strong>
+      across ${res.removed} item(s).
+      ${res.mode === "trash" ? "Empty the Trash to actually reclaim the space." : ""}
+      ${res.remaining ? `<br>Stopped with ${res.remaining} item(s) left — run it again to finish.` : ""}
+      <table class="data">
+        <tr><th>Location</th><th class="num">Freed</th><th class="num">Items</th></tr>
+        ${res.results.map(r => `<tr><td>${esc(r.name)}</td>
+          <td class="num">${bytes(r.freed)}</td><td class="num">${r.removed}</td></tr>`).join("")}
+      </table>${errs}</div>`;
+  }
+
+  // ---- background clean job ----------------------------------------------
+  // clean_job.py runs the delete in a detached worker, so it survives the
+  // 60 s runPython limit and this page being closed. The page only polls the
+  // worker's status file and mirrors it into the popover and fused.trackJob;
+  // the worker reports to the activity panel itself under the same job id, so
+  // the row keeps moving while the page is gone.
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const jobStatus = () => fused.runPython("./clean_job.py", { action: "status" }, { key: "clean-job" });
+  let watching = null;     // id of the job this page is polling
+  let stopClicked = false;
+  let pendingResult = null; // finished job whose banner hasn't been shown yet
+
+  document.getElementById("progressHide").addEventListener("click", hideProgress);
+  document.getElementById("progressCancel").addEventListener("click", e => {
+    stopClicked = true;
+    e.target.disabled = true;
+    e.target.textContent = "Stopping…";
+  });
+
+  async function watchJob(job) {
+    if (watching === job.id) return;
+    watching = job.id;
+    stopClicked = false;
+    const track = fused.trackJob({
+      id: job.id, title: job.title, kind: "task", unit: "bytes", cancellable: true,
+    });
+    showProgress(job.mode === "trash" ? "Moving to Trash…" : "Deleting…");
+    let stopSent = false, failures = 0;
+    for (;;) {
+      const total = job.total ? Math.max(job.total, job.freed) : 0;
+      updateProgress(total ? job.freed / total * 100 : 0,
+        `${bytes(job.freed)}${total ? " of " + bytes(total) : ""} freed · ${job.detail || ""}`);
+      if (job.state !== "running") break;
+      track.update({ done: job.freed, total: total || undefined, detail: job.detail });
+      if (!stopSent && (stopClicked || track.cancelRequested)) {
+        stopSent = true;
+        fused.runPython("./clean_job.py", { action: "cancel" }, { key: null }).catch(() => {});
+      }
+      await sleep(1000);
+      try {
+        job = await jobStatus();
+        failures = 0;
+      } catch (err) {
+        // The worker keeps running and reporting on its own; just stop
+        // watching after a run of failed status reads.
+        if (++failures >= 5) {
+          watching = null;
+          hideProgress();
+          panel.insertAdjacentHTML("afterbegin",
+            `<div class="banner error"><strong>Lost track of the cleanup</strong> — ${esc(err.message)}.
+             It is still running; follow it in the activity panel.</div>`);
+          return;
+        }
+      }
+    }
+    if (job.state === "done") track.finish(job.detail);
+    else if (job.state === "cancelled") track.cancelled();
+    else track.fail(job.detail || "cleanup failed");
+    watching = null;
+    hideProgress();
+    pendingResult = job;
+    if (P.tab() === "clean") {
+      cleanData = null;          // sizes changed on disk — force a fresh fetch
+      await renderClean(true);   // full rebuild now, with the result banner
+      fused.params.set("sel", ""); // cleanData is warm again, so this only patches
+    }
+  }
+
+  // Called on a full Cleanup rebuild: turn a finished job into the banner once.
+  function takePendingResult() {
+    const job = pendingResult;
+    if (!job) return;
+    pendingResult = null;
+    fused.runPython("./clean_job.py", { action: "ack" }, { key: null }).catch(() => {});
+    if (job.result) lastResult = job.result;
+    else panel.insertAdjacentHTML("afterbegin",
+      `<div class="banner error"><strong>Cleanup failed</strong> — ${esc(job.detail || "unknown error")}</div>`);
+  }
+
+  async function doClean(mode) {
+    const ids = P.sel();
+    if (!ids.length) return;
+    const data = await fused.runPython("./caches.py", {});
+    const chosen = data.entries.filter(e => ids.includes(e.id) && e.exists && e.size > 0);
+    if (!chosen.length) return;
+    const total = chosen.reduce((a, e) => a + e.size, 0);
+
+    const verb = mode === "trash" ? "Move to Trash" : "Permanently delete";
+    const ok = await showConfirm(
+      `${verb} ${chosen.length} location(s), about ${bytes(total)}?`,
+      chosen.map(e => "• " + e.name + "  (" + e.path + ")  " + bytes(e.size)).join("\n") +
+        "\n\nThe directories themselves are kept; only their contents are removed.",
+      verb
+    );
+    if (!ok) return;
+
+    let job;
+    try {
+      job = await fused.runPython("./clean_job.py", {
+        action: "start", ids: chosen.map(e => e.id).join(","), mode, confirm: "true",
+        total, origin: location.origin,
+      }, { key: null });
+    } catch (err) {
+      panel.insertAdjacentHTML("afterbegin",
+        `<div class="banner error"><strong>${esc(err.type || "error")}</strong> — ${esc(err.message)}</div>`);
+      return;
+    }
+    watchJob(job);
+  }
+
+  // ---- duplicates --------------------------------------------------------
+  // dupes.py walks the home folder in a detached worker (a full scan takes
+  // minutes), so this tab works like the clean job: start it, then poll its
+  // status file. The worker reports to the activity panel itself, so the
+  // scan keeps showing progress there after this page closes. Read-only: no
+  // file is changed, this only measures what is stored more than once.
+  const dupesStatus = () => fused.runPython("./dupes.py", { action: "status" }, { key: "dupes-job" });
+  const dupesResult = () => fused.runPython("./dupes.py", { action: "result" }, { key: "dupes-result" });
+  let dupesPolling = false;
+
+  function dupesHero(job, res) {
+    if (job && job.state === "running") {
+      const pct = job.total ? Math.min(100, job.done / job.total * 100) : 0;
+      const detail = job.phase === "listing"
+        ? `${job.files_seen.toLocaleString()} files looked at`
+        : `${bytes(job.done)} of ${bytes(job.total)} compared · ${job.detail || ""}`;
+      return `<div class="card hero">
+          <div class="hero-num pending">…</div>
+          <p class="hero-sub">Looking for files stored more than once…</p>
+          <div class="progress-track"><span class="progress-fill" style="width:${pct.toFixed(1)}%"></span></div>
+          <div class="progress-detail">${esc(detail)}</div>
+          <p class="hero-meta"><button class="link" data-dupes="cancel">Stop</button> ·
+            Keeps running if you leave; progress stays in the activity panel.</p>
+        </div>`;
+    }
+    if (!res) {
+      return `<div class="card hero">
+          <div class="hero-num pending">?</div>
+          <p class="hero-sub">How much of your disk holds the same file twice?</p>
+          <button class="btn cta" data-dupes="start">Find duplicate files</button>
+          <p class="hero-meta">Reads files in your home folder (1 MB and up) and compares them.
+            Nothing is changed or deleted.</p>
+        </div>`;
+    }
+    const p = bytesParts(res.savings);
+    const fold = res.foldable
+      ? `This disk (${esc(res.fs.toUpperCase())}) can let copies share one set of blocks — the space comes back without deleting any file.`
+      : `This disk (${esc(res.fs)}) can't share blocks between files, so the space only comes back by removing copies.`;
+    const shared = res.already_shared > 0
+      ? ` ${bytes(res.already_shared)} of copies already share space and aren't counted.` : "";
+    return `<div class="card hero">
+        <div class="hero-num">${p.value}<span class="unit">${p.unit}</span></div>
+        <p class="hero-sub">${res.savings > 0 ? "is taken up by extra copies of the same files." : "No duplicate files worth mentioning."}</p>
+        ${res.savings > 0 ? `<p class="hint">${fold}${shared}</p>` : ""}
+        <p class="hero-meta">${res.sets_total.toLocaleString()} sets of identical files ·
+          ${res.files_seen.toLocaleString()} files checked · scanned ${ago(Date.now() / 1000 - res.scanned_at)} ·
+          <button class="link" data-dupes="start">Scan again</button></p>
+      </div>`;
+  }
+
+  function dupeSets(sets) {
+    return sets.map(s => {
+      const name = s.paths[0].split("/").pop();
+      const others = s.paths.length - s.stored;
+      return `<details class="dset">
+          <summary>
+            <span class="icon">▸</span>
+            <span class="name">${esc(name)}<span class="meta">${s.paths.length} copies${others ? ` · ${others} already sharing space` : ""}</span></span>
+            <span class="each">${bytes(s.size)} each</span>
+            <span class="size">${bytes(s.savings)}</span>
+          </summary>
+          <ul>${s.paths.slice(0, 20).map(p => `<li title="${esc(p)}">${esc(p)}</li>`).join("")}${
+            s.paths.length > 20 ? `<li class="shared">and ${s.paths.length - 20} more</li>` : ""}</ul>
+        </details>`;
+    }).join("");
+  }
+
+  async function renderDupes(keep) {
+    if (!keep) panel.innerHTML = loadingCard("Checking for an earlier scan…");
+    let job, res;
+    try {
+      [job, res] = await Promise.all([dupesStatus(), dupesResult()]);
+    } catch (err) {
+      panel.innerHTML = `<div class="banner error"><strong>${esc(err.type || "error")}</strong> — ${esc(err.message)}</div>`;
+      return;
+    }
+    if (P.tab() !== "dupes") return;
+    if (res && res.none) res = null;
+    const failed = job.state === "error"
+      ? `<div class="banner error"><strong>The duplicate scan stopped</strong> — ${esc(job.detail)}</div>` : "";
+    let body = "";
+    if (res && res.savings > 0 && job.state !== "running") {
+      const shown = res.folders.slice(0, 8).map(f => ({
+        name: f.name, size: f.savings, files: f.copies, path: f.path,
+      }));
+      body = `
+        <div class="card">
+          <h2>Where the extra copies are</h2>
+          <p class="hint">Savings credited to the folder holding each extra copy</p>
+          ${barRows(shown, { navigate: false, total: res.savings, unit: "extra copies" })}
+        </div>
+        <div class="card">
+          <h2>Biggest sets of identical files</h2>
+          <p class="hint">${res.sets.length < res.sets_total ? `Top ${res.sets.length} of ${res.sets_total.toLocaleString()} · ` : ""}open a row to see every copy</p>
+          ${dupeSets(res.sets.slice(0, 100))}
+        </div>`;
+    }
+    panel.innerHTML = failed + dupesHero(job, res) + body;
+    if (job.state === "running") pollDupes();
+  }
+
+  // Repaints only the hero while the scan runs, so an open set list (or the
+  // scroll position) isn't thrown away every second.
+  async function pollDupes() {
+    if (dupesPolling) return;
+    dupesPolling = true;
+    try {
+      for (;;) {
+        await sleep(1000);
+        if (P.tab() !== "dupes") return;
+        let job;
+        try { job = await dupesStatus(); } catch { continue; }
+        if (P.tab() !== "dupes") return;
+        if (job.state !== "running") return renderDupes(true);
+        const heroEl = panel.querySelector(".hero");
+        if (heroEl) heroEl.outerHTML = dupesHero(job, null);
+      }
+    } finally {
+      dupesPolling = false;
+    }
+  }
+
+  async function dupesAction(action) {
+    try {
+      await fused.runPython("./dupes.py", { action, origin: location.origin }, { key: null });
+    } catch (err) {
+      panel.insertAdjacentHTML("afterbegin",
+        `<div class="banner error"><strong>${esc(err.type || "error")}</strong> — ${esc(err.message)}</div>`);
+      return;
+    }
+    renderDupes(true);
+  }
+
+  // ---- routing -----------------------------------------------------------
+  const TABS = { overview: renderOverview, clean: renderClean, dupes: renderDupes };
+
+  async function draw() {
+    const tab = TABS[P.tab()] ? P.tab() : "overview";
+    if (tab !== "clean") { lastResult = null; cleanData = null; }   // don't resurrect stale state
+    document.querySelectorAll("#tabs button").forEach(b =>
+      b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false"));
+    await TABS[tab]();
+  }
+
+  document.getElementById("tabs").addEventListener("click", e => {
+    const btn = e.target.closest("button[data-tab]");
+    if (btn) setParam("tab", btn.dataset.tab);
+  });
+
+  // One delegated handler for everything the panels render.
+  panel.addEventListener("click", async e => {
+    const go = e.target.closest("[data-tab-go]");
+    if (go) return setParam("tab", go.dataset.tabGo);
+
+    if (e.target.closest("[data-refresh-caches]")) {
+      panel.innerHTML = loadingCard("Rescanning caches…");
+      await fused.runPython("./caches.py", { refresh: "true" });
+      cleanData = null;
+      return renderClean(true);
+    }
+
+    const select = e.target.closest("[data-select]");
+    if (select) {
+      const data = cleanData || await fused.runPython("./caches.py", {});
+      const present = data.entries.filter(e2 => e2.exists && e2.size > 0);
+      const mode = select.dataset.select;
+      const ids = mode === "none" ? []
+        : mode === "safe" ? present.filter(e2 => e2.risk === "safe").map(e2 => e2.id)
+        : present.map(e2 => e2.id);
+      return setParam("sel", ids.join(","));
+    }
+
+    const clean = e.target.closest("[data-clean]");
+    if (clean) return doClean(clean.dataset.clean);
+
+    const dupes = e.target.closest("[data-dupes]");
+    if (dupes) {
+      dupes.disabled = true;
+      return dupesAction(dupes.dataset.dupes);
+    }
+  });
+
+  panel.addEventListener("change", e => {
+    const box = e.target.closest("input[data-id]");
+    if (!box) return;
+    const sel = new Set(P.sel());
+    box.checked ? sel.add(box.dataset.id) : sel.delete(box.dataset.id);
+    setParam("sel", [...sel].join(","));
+  });
+
+  // Every colour lives in a token and every mark is CSS, so a theme swap needs
+  // no redraw — nothing here hands a colour to JS.
+  fused.params.onChange(draw);
+  narrow.addEventListener("change", draw);
+  draw();
+
+  function isPreview() {
+    if (new URLSearchParams(location.search).get("_preview") === "1") return true;
+    try {
+      let w = window;
+      while (w.parent && w.parent !== w) {
+        w = w.parent;
+        if (new URLSearchParams(w.location.search).get("_preview") === "1") return true;
+      }
+    } catch (e) { /* cross-origin ancestor: the climb ends here */ }
+    return false;
+  }
+
+  // Re-attach to a cleanup started before this page was (re)opened: follow it
+  // if it's still running, or show its result banner if nobody has yet.
+  if (!isPreview()) {
+    jobStatus().then(job => {
+      if (job.state === "running") return watchJob(job);
+      if (job.state !== "none" && !job.acked) {
+        pendingResult = job;
+        if (P.tab() === "clean") { cleanData = null; renderClean(true); }
+      }
+    }).catch(() => {});
+  }
+</script>
+</body>
+</html>
