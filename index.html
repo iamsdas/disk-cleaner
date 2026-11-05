@@ -302,6 +302,19 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   details.dset li .shared { color: var(--muted); }
+  details.dset li { display: flex; align-items: center; gap: 8px; }
+  details.dset li label {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; cursor: pointer;
+  }
+  details.dset li label span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  details.dset li input { margin: 0; accent-color: var(--fill); }
+  details.dset li input:checked + span { color: var(--text); }
+  details.dset li .link { font-size: 12px; flex: none; }
+  .dset-actions {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin: 0 6px 14px 36px; font-size: 12px; color: var(--muted);
+  }
+  .dset-actions .btn { font-size: 12px; padding: 4px 10px; }
   /* Compact view: overrides for the rules above, so they must come last. */
   @media (max-width: 640px) {
     main { padding: 8px 8px 16px; }
@@ -419,10 +432,13 @@
   // A determinate progress popover for the background clean job — sits over
   // the (still-visible) cleanup list. "Keep running" only hides it; "Stop"
   // asks the worker to stop between items.
-  function showProgress(title) {
+  function showProgress(title, opts = {}) {
     const stop = document.getElementById("progressCancel");
     stop.disabled = false;
     stop.textContent = "Stop";
+    document.getElementById("progressHide").textContent = opts.hideLabel || "Keep running in background";
+    document.querySelector("#progressOverlay .progress-hint").textContent = opts.hint ||
+      "Runs in the background — you can leave this page. Progress stays in the activity panel.";
     document.getElementById("progressTitle").textContent = title;
     document.getElementById("progressFill").style.width = "0%";
     document.getElementById("progressDetail").textContent = "";
@@ -834,11 +850,13 @@
   // dupes.py walks the home folder in a detached worker (a full scan takes
   // minutes), so this tab works like the clean job: start it, then poll its
   // status file. The worker reports to the activity panel itself, so the
-  // scan keeps showing progress there after this page closes. Read-only: no
-  // file is changed, this only measures what is stored more than once.
+  // scan keeps showing progress there after this page closes. The scan is
+  // read-only; changing files is dupe_action.py's job (see below).
   const dupesStatus = () => fused.runPython("./dupes.py", { action: "status" }, { key: "dupes-job" });
   const dupesResult = () => fused.runPython("./dupes.py", { action: "result" }, { key: "dupes-result" });
   let dupesPolling = false;
+  let dupesData = null;    // last scan result shown on the tab
+  let dupeBanner = null;   // outcome of the last merge/trash, shown once on the next paint
 
   function dupesHero(job, res) {
     if (job && job.state === "running") {
@@ -880,21 +898,54 @@
       </div>`;
   }
 
-  function dupeSets(sets) {
+  // APFS can turn extra copies into clones of one file: every path stays,
+  // the blocks are stored once. Elsewhere the only way back is removing copies.
+  const canMerge = res => res && res.fs === "apfs";
+
+  function dupeSets(sets, res) {
     return sets.map(s => {
       const name = s.paths[0].split("/").pop();
       const others = s.paths.length - s.stored;
-      return `<details class="dset">
+      const extra = s.paths.length - 1;
+      return `<details class="dset" data-hash="${esc(s.hash)}">
           <summary>
             <span class="icon">▸</span>
             <span class="name">${esc(name)}<span class="meta">${s.paths.length} copies${others ? ` · ${others} already sharing space` : ""}</span></span>
             <span class="each">${bytes(s.size)} each</span>
             <span class="size">${bytes(s.savings)}</span>
           </summary>
-          <ul>${s.paths.slice(0, 20).map(p => `<li title="${esc(p)}">${esc(p)}</li>`).join("")}${
+          <ul>${s.paths.slice(0, 20).map((p, i) => `<li title="${esc(p)}">
+              <label><input type="radio" name="keep-${esc(s.hash)}" value="${esc(p)}" ${i ? "" : "checked"}>
+                <span>${esc(p)}</span></label>
+              <button class="link" data-reveal="${esc(p)}">Show in Finder</button></li>`).join("")}${
             s.paths.length > 20 ? `<li class="shared">and ${s.paths.length - 20} more</li>` : ""}</ul>
+          <div class="dset-actions">
+            <span>Keep the copy you picked, then</span>
+            ${canMerge(res) ? `<button class="btn primary" data-dset="merge"
+              title="Every path stays; the copies share one set of blocks until one is edited">Merge into one stored copy</button>` : ""}
+            <button class="btn" data-dset="trash">Move ${extra} other ${extra === 1 ? "copy" : "copies"} to Trash</button>
+          </div>
         </details>`;
     }).join("");
+  }
+
+  function dupeActionBanner(r) {
+    const verb = r.action === "merge" ? "Merged" : "Moved to Trash";
+    const skipped = r.skipped.length
+      ? `<details><summary>${r.skipped.length} cop${r.skipped.length === 1 ? "y was" : "ies were"} left alone</summary>
+           <table class="data">${r.skipped.slice(0, 40).map(s =>
+             `<tr><td>${esc(s.path)}</td><td>${esc(s.why)}</td></tr>`).join("")}</table></details>` : "";
+    const trashed = r.action === "trash" && r.done_paths.length
+      ? `<details><summary>Where the trashed copies came from</summary>
+           <table class="data">${r.done_paths.slice(0, 60).map(p =>
+             `<tr><td>${esc(p)}</td><td>${r.no_put_back.includes(p) ? "no Put Back — restore by hand" : "Put Back works"}</td></tr>`).join("")}</table></details>` : "";
+    const noPutBack = r.no_put_back && r.no_put_back.length
+      ? `<br>Finder couldn't trash ${r.no_put_back.length} of them, so they were moved into the Trash directly and
+         “Put Back” won't work for those. Allow this app to control Finder in System Settings → Privacy &amp; Security → Automation.` : "";
+    return `<div class="banner ${r.done ? "done" : "error"}">
+        <strong>${verb} ${r.done} cop${r.done === 1 ? "y" : "ies"} · ${bytes(r.freed)} ${r.action === "merge" ? "freed" : "to free once the Trash is emptied"}</strong>
+        ${r.remaining ? `<br>Stopped with ${r.remaining} cop${r.remaining === 1 ? "y" : "ies"} left — run it again to finish.` : ""}
+        ${noPutBack}${skipped}${trashed}</div>`;
   }
 
   async function renderDupes(keep) {
@@ -923,11 +974,15 @@
         </div>
         <div class="card">
           <h2>Biggest sets of identical files</h2>
-          <p class="hint">${res.sets.length < res.sets_total ? `Top ${res.sets.length} of ${res.sets_total.toLocaleString()} · ` : ""}open a row to see every copy</p>
-          ${dupeSets(res.sets.slice(0, 100))}
+          <p class="hint">${res.sets.length < res.sets_total ? `Top ${res.sets.length} of ${res.sets_total.toLocaleString()} · ` : ""}open a row to see every copy and choose what to do with it${
+            canMerge(res) ? ` · <button class="link" data-dupes-all="merge">Merge all ${res.sets.length} sets into shared copies</button>` : ""}</p>
+          ${dupeSets(res.sets.slice(0, 100), res)}
         </div>`;
     }
-    panel.innerHTML = failed + dupesHero(job, res) + body;
+    dupesData = res;
+    const banner = dupeBanner ? dupeBanner : "";
+    dupeBanner = null;
+    panel.innerHTML = failed + banner + dupesHero(job, res) + body;
     if (job.state === "running") pollDupes();
   }
 
@@ -961,6 +1016,85 @@
       return;
     }
     renderDupes(true);
+  }
+
+  // ---- acting on duplicates ---------------------------------------------
+  // dupe_action.py does one set per call (re-checks every copy byte for byte
+  // before touching it) and rewrites the saved result, so a re-render after
+  // it shows what's left without rescanning.
+  const runDupeAction = (args) =>
+    fused.runPython("./dupe_action.py", { confirm: "true", ...args }, { key: null });
+
+  function dupeError(err) {
+    panel.insertAdjacentHTML("afterbegin",
+      `<div class="banner error"><strong>${esc(err.type || "error")}</strong> — ${esc(err.message)}</div>`);
+  }
+
+  async function dupeSetAction(details, action) {
+    const hash = details.dataset.hash;
+    const s = dupesData && dupesData.sets.find(x => x.hash === hash);
+    if (!s) return;
+    const picked = details.querySelector(`input[type=radio]:checked`);
+    const keep = picked ? picked.value : s.paths[0];
+    const others = s.paths.filter(p => p !== keep);
+    const list = others.slice(0, 12).map(p => "• " + p).join("\n") +
+      (others.length > 12 ? `\n…and ${others.length - 12} more` : "");
+    const ok = action === "merge"
+      ? await showConfirm(`Merge ${others.length + 1} copies of ${s.paths[0].split("/").pop()}?`,
+          `Keeping:\n${keep}\n\nThese become clones of it — same path, contents and dates, but stored once:\n${list}\n\n` +
+          `Each copy is compared byte for byte first. Editing one later doesn't change the others. Frees about ${bytes(s.savings)}.`,
+          "Merge")
+      : await showConfirm(`Move ${others.length} ${others.length === 1 ? "copy" : "copies"} to the Trash?`,
+          `Keeping:\n${keep}\n\nMoving to the Trash:\n${list}\n\n` +
+          `Each copy is compared byte for byte first. You can use “Put Back” in the Trash to restore one; ` +
+          `the space comes back once the Trash is emptied.`,
+          "Move to Trash");
+    if (!ok) return;
+    details.querySelectorAll("[data-dset]").forEach(b => { b.disabled = true; });
+    try {
+      dupeBanner = dupeActionBanner(await runDupeAction({ action, hash, keep }));
+    } catch (err) {
+      details.querySelectorAll("[data-dset]").forEach(b => { b.disabled = false; });
+      return dupeError(err);
+    }
+    renderDupes(true);
+  }
+
+  // "Merge all": one call per set, so no call nears the 60 s limit. Runs from
+  // this page (not a detached worker) — closing the tab stops it between sets.
+  async function mergeAllDupes() {
+    const sets = (dupesData && dupesData.sets) || [];
+    if (!sets.length) return;
+    const total = sets.reduce((a, s) => a + s.savings, 0);
+    const ok = await showConfirm(`Merge all ${sets.length} sets of identical files?`,
+      `Every extra copy becomes a clone of the first copy in its set: all ${sets.reduce((a, s) => a + s.paths.length, 0)} paths ` +
+      `stay where they are with the same contents and dates, but each set is stored once.\n\n` +
+      `Each copy is compared byte for byte first, and anything that changed since the scan is left alone. ` +
+      `Editing one copy later doesn't change the others. Frees about ${bytes(total)}.`,
+      "Merge all");
+    if (!ok) return;
+    stopClicked = false;
+    showProgress("Merging duplicate files…", { hideLabel: "Hide",
+      hint: "Keep this page open while it runs — closing it stops the merge between sets. Anything already merged stays merged." });
+    const sum = { action: "merge", done: 0, freed: 0, remaining: 0, skipped: [], done_paths: [], no_put_back: [] };
+    let freed = 0;
+    for (let i = 0; i < sets.length; i++) {
+      if (stopClicked) break;
+      const s = sets[i];
+      updateProgress(i / sets.length * 100,
+        `${bytes(freed)} of ${bytes(total)} freed · ${i + 1} of ${sets.length} · ${s.paths[0].split("/").pop()}`);
+      try {
+        const r = await runDupeAction({ action: "merge", hash: s.hash, keep: s.paths[0] });
+        sum.done += r.done; sum.remaining += r.remaining; sum.skipped.push(...r.skipped);
+        freed += r.freed;
+      } catch (err) {
+        sum.skipped.push({ path: s.paths[0], why: err.message });
+      }
+    }
+    sum.freed = freed;
+    hideProgress();
+    dupeBanner = dupeActionBanner(sum);
+    if (P.tab() === "dupes") renderDupes(true);
   }
 
   // ---- routing -----------------------------------------------------------
@@ -1004,6 +1138,18 @@
 
     const clean = e.target.closest("[data-clean]");
     if (clean) return doClean(clean.dataset.clean);
+
+    const reveal = e.target.closest("[data-reveal]");
+    if (reveal) {
+      e.preventDefault();
+      const hash = reveal.closest("details.dset").dataset.hash;
+      return runDupeAction({ action: "reveal", hash, path: reveal.dataset.reveal }).catch(dupeError);
+    }
+
+    const dset = e.target.closest("[data-dset]");
+    if (dset) return dupeSetAction(dset.closest("details.dset"), dset.dataset.dset);
+
+    if (e.target.closest("[data-dupes-all]")) return mergeAllDupes();
 
     const dupes = e.target.closest("[data-dupes]");
     if (dupes) {
