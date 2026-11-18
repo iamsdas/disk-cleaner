@@ -255,11 +255,16 @@ def run(wanted: list, mode: str, deadline: float, progress=None) -> dict:
                 "errors": [getattr(err, "strerror", None) or str(err)],
             })
 
-    # Drop the cached sizes so the next scan reflects what just happened.
-    try:
-        os.remove(os.path.join(catalog.CACHE_DIR, "caches.json"))
-    except OSError:
-        pass
+    # Drop the cached sizes of everything just cleaned so the next listing
+    # re-measures them instead of showing the old numbers.
+    for cid in wanted:
+        abs_path = catalog.resolve_entry(catalog.CATALOG_BY_ID[cid])
+        if not abs_path:
+            continue
+        try:
+            os.remove(catalog.size_cache_path(abs_path))
+        except OSError:
+            pass
 
     return {
         "mode": mode,

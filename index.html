@@ -560,6 +560,46 @@
     return frame;
   }
 
+  // Totals over the entries sized so far. Nested entries are skipped — their
+  // bytes already sit inside an ancestor's size.
+  function cacheTotals(data) {
+    const countable = data.entries.filter(e => e.exists && !e.nested_under);
+    data.total = countable.reduce((a, e) => a + e.size, 0);
+    data.reclaimable = countable.filter(e => e.risk !== "review").reduce((a, e) => a + e.size, 0);
+    data.pendingCount = data.entries.filter(e => e.pending).length;
+    return data;
+  }
+
+  // Same shape as scanProgressive: caches.py lists every location instantly
+  // (with any sizes already cached), then each unsized one is measured by its
+  // own size_dir.py call, so nothing waits on the slowest directory.
+  async function cachesProgressive(onUpdate, opts) {
+    const refresh = !!(opts && opts.refresh);
+    const data = await fused.runPython("./caches.py",
+      PREVIEW ? { cached_only: "true" } : { refresh: String(refresh) });
+    onUpdate(cacheTotals(data));
+
+    const pending = PREVIEW ? [] : data.entries.filter(e => e.pending);
+    const CONCURRENCY = 4;
+    let cursor = 0;
+    async function worker() {
+      while (cursor < pending.length) {
+        const entry = pending[cursor++];
+        try {
+          // These missed the listing's cache already, so always re-measure.
+          const sized = await fused.runPython("./size_dir.py",
+            { path: entry.abs, refresh: "true" }, { key: "cache:" + entry.abs });
+          Object.assign(entry, { size: sized.size, files: sized.files, truncated: sized.truncated, pending: false });
+        } catch (err) {
+          Object.assign(entry, { size: 0, files: 0, pending: false, error: true });
+        }
+        onUpdate(cacheTotals(data));
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length) }, worker));
+    return data;
+  }
+
   // Same one-hue ramp as the bar fill — a bigger share of the total reads as
   // a stronger step of that ramp, never a different hue or a status color.
   function shareColor(share) {
@@ -599,19 +639,19 @@
       const cachesCard = caches ? `
         <div class="card">
           <h2>Biggest caches</h2>
-          <p class="hint">${bytes(caches.total)} across ${caches.entries.filter(e => e.exists).length} locations</p>
-          ${barRows(caches.entries.filter(e => e.exists && e.size > 0).slice(0, 6).map(e => ({ ...e, is_dir: true })),
+          <p class="hint">${bytes(caches.total)} across ${caches.entries.filter(e => e.exists).length} locations${caches.pendingCount ? ` · sizing ${caches.pendingCount} more…` : ""}</p>
+          ${barRows(caches.entries.filter(e => e.exists && e.size > 0).sort((a, b) => b.size - a.size).slice(0, 6).map(e => ({ ...e, is_dir: true })),
             { navigate: false, total: caches.total })}
           <p class="note"><button class="link" data-tab-go="clean">Select what to clean →</button></p>
         </div>` : loadingCard("Measuring caches…");
 
+      if (P.tab() !== "overview" && TABS[P.tab()]) return;   // user moved on
       panel.innerHTML = volCard + foldersCard + cachesCard;
     }
 
     await Promise.all([
       scanProgressive("~", f => { frame = f; paint(); }),
-      fused.runPython("./caches.py", PREVIEW ? { cached_only: "true" } : {})
-        .then(c => { if (!c.none) { caches = c; paint(); } }),
+      cachesProgressive(c => { caches = c; paint(); }),
       // Only a finished earlier scan counts; this tab never starts one.
       dupesResult().then(d => { if (!d.none && d.savings > 0) { dupes = d; paint(); } }).catch(() => {}),
     ]);
@@ -638,6 +678,28 @@
     return { sel, selEntries, selBytes };
   }
 
+  // An unsized-but-present location can be picked straight away — no need
+  // to wait for its size to land before cleaning it.
+  const selectable = e => e.exists && (e.pending || e.size > 0);
+  const sizeLabel = e => !e.exists ? "not present" : e.pending ? "sizing…" : bytes(e.size);
+  const filesLabel = e => e.exists && e.files ? e.files.toLocaleString() + " files" : "";
+  const cacheHint = d => `${bytes(d.total)} total, ${bytes(d.reclaimable)} outside the “Review” group` +
+    (d.pendingCount ? ` · sizing ${d.pendingCount} more…` : "");
+
+  // A size landed: update just that row's numbers and the totals in place.
+  function patchCleanSizes(data) {
+    data.entries.forEach(e => {
+      const row = panel.querySelector(`[data-row="${e.id}"]`);
+      if (!row) return;
+      row.querySelector(".size").textContent = sizeLabel(e);
+      row.querySelector(".files").textContent = filesLabel(e);
+      row.querySelector("input[data-id]").disabled = !selectable(e);
+    });
+    const hint = panel.querySelector(".cache-totals");
+    if (hint) hint.textContent = cacheHint(data);
+    patchCleanSelection(data);
+  }
+
   function buildCleanDom(data) {
     const byId = {};
     data.entries.forEach(e => { byId[e.id] = e; });
@@ -650,16 +712,16 @@
         const risk = RISK[e.risk];
         const nestNote = e.nested_under && byId[e.nested_under]
           ? ` · counted inside “${esc(byId[e.nested_under].name)}”` : "";
-        return `<div class="crow ${e.exists ? "" : "missing"}">
+        return `<div class="crow ${e.exists ? "" : "missing"}" data-row="${e.id}">
           <label>
             <input type="checkbox" data-id="${e.id}" ${sel.has(e.id) ? "checked" : ""}
-                   ${e.exists && e.size ? "" : "disabled"}>
+                   ${selectable(e) ? "" : "disabled"}>
             <span class="name">
               <span>${esc(e.name)}<span class="risk"><i class="dot" style="background:${risk.color}"></i>${risk.label}</span></span>
               <div class="desc">${esc(e.desc)} · <code>${esc(e.path)}</code>${nestNote}</div>
             </span>
-            <span class="size">${e.exists ? bytes(e.size) : "not present"}</span>
-            <span class="files">${e.exists && e.files ? e.files.toLocaleString() + " files" : ""}</span>
+            <span class="size">${sizeLabel(e)}</span>
+            <span class="files">${filesLabel(e)}</span>
           </label>
         </div>`;
       }).join("");
@@ -670,8 +732,7 @@
       ${lastResult ? resultBanner(lastResult) : ""}
       <div class="card">
         <h2>Cache locations</h2>
-        <p class="hint">${data.cached ? "Sizes from cache, " + ago(data.age) + " · " : ""}
-          ${bytes(data.total)} total, ${bytes(data.reclaimable)} outside the “Review” group ·
+        <p class="hint"><span class="cache-totals">${cacheHint(data)}</span> ·
           <button class="link" data-refresh-caches="1">Rescan</button></p>
         ${groupHtml}
         <p class="note">
@@ -709,10 +770,14 @@
 
   async function renderClean(force) {
     if (!cleanData || force) {
-      panel.innerHTML = loadingCard("Measuring cache locations…");
-      cleanData = await fused.runPython("./caches.py", {});
-      takePendingResult();
-      buildCleanDom(cleanData);
+      panel.innerHTML = loadingCard("Listing cache locations…");
+      let built = false;
+      await cachesProgressive(data => {
+        if (P.tab() !== "clean") return;   // user moved on
+        cleanData = data;
+        if (!built) { built = true; takePendingResult(); buildCleanDom(data); }
+        else patchCleanSizes(data);
+      }, { refresh: !!(force && force.refresh) });
     } else {
       patchCleanSelection(cleanData);
     }
@@ -818,15 +883,17 @@
   async function doClean(mode) {
     const ids = P.sel();
     if (!ids.length) return;
-    const data = await fused.runPython("./caches.py", {});
-    const chosen = data.entries.filter(e => ids.includes(e.id) && e.exists && e.size > 0);
+    // Use what's on screen — sizes still being measured don't block a clean.
+    const data = cleanData || await fused.runPython("./caches.py", {});
+    const chosen = data.entries.filter(e => ids.includes(e.id) && selectable(e));
     if (!chosen.length) return;
     const total = chosen.reduce((a, e) => a + e.size, 0);
+    const stillSizing = chosen.some(e => e.pending);
 
     const verb = mode === "trash" ? "Move to Trash" : "Permanently delete";
     const ok = await showConfirm(
-      `${verb} ${chosen.length} location(s), about ${bytes(total)}?`,
-      chosen.map(e => "• " + e.name + "  (" + e.path + ")  " + bytes(e.size)).join("\n") +
+      `${verb} ${chosen.length} location(s), ${stillSizing ? "at least" : "about"} ${bytes(total)}?`,
+      chosen.map(e => "• " + e.name + "  (" + e.path + ")  " + sizeLabel(e)).join("\n") +
         "\n\nThe directories themselves are kept; only their contents are removed.",
       verb
     );
@@ -1119,16 +1186,14 @@
     if (go) return setParam("tab", go.dataset.tabGo);
 
     if (e.target.closest("[data-refresh-caches]")) {
-      panel.innerHTML = loadingCard("Rescanning caches…");
-      await fused.runPython("./caches.py", { refresh: "true" });
       cleanData = null;
-      return renderClean(true);
+      return renderClean({ refresh: true });
     }
 
     const select = e.target.closest("[data-select]");
     if (select) {
       const data = cleanData || await fused.runPython("./caches.py", {});
-      const present = data.entries.filter(e2 => e2.exists && e2.size > 0);
+      const present = data.entries.filter(selectable);
       const mode = select.dataset.select;
       const ids = mode === "none" ? []
         : mode === "safe" ? present.filter(e2 => e2.risk === "safe").map(e2 => e2.id)
