@@ -370,8 +370,66 @@ def mark_nested(entries: list[dict]) -> None:
             child["nested_under"] = best["id"]
 
 
-def dir_size(path: str, deadline: float | None = None) -> tuple[int, int, bool]:
-    """Recursive apparent size of `path`.
+def dir_size(path: str, deadline: float | None = None) -> tuple[int, int | None, bool]:
+    """Recursive on-disk size of `path`: (bytes, file_count or None, truncated).
+
+    Uses `du`, which is roughly 10x faster than a Python walk and counts
+    allocated blocks (what actually frees up) rather than apparent sizes. A
+    big tree (hundreds of agent worktrees, say) still may not finish inside
+    the budget, so du runs with `-d 1` and its output is read as it streams:
+    du prints each immediate subdirectory's total the moment that subtree is
+    done, and on timeout the finished ones are summed into a lower bound
+    instead of throwing the whole walk away. File counts are not available
+    from du, so they come back None. Falls back to the Python walk if du is
+    missing.
+    """
+    du = "/usr/bin/du" if os.path.exists("/usr/bin/du") else None
+    if du is None:
+        return _walk_size(path, deadline)
+    import subprocess
+    import threading
+
+    root = os.path.normpath(path)
+    proc = subprocess.Popen([du, "-k", "-x", "-d", "5", root], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True)
+    # du's output is post-order: a directory's line comes right after the
+    # lines of everything below it. So the stack below always holds the
+    # largest finished subtrees seen so far — a new line replaces whatever
+    # on top of the stack sits inside it — and their sum is the lower bound.
+    stack: list[tuple[str, int]] = []
+    partial = 0
+    total = None
+    timer = None
+    if deadline is not None:
+        timer = threading.Timer(max(0.0, deadline - time.monotonic()), proc.kill)
+        timer.start()
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            kb, _, p = line.rstrip("\n").partition("\t")
+            try:
+                n = int(kb) * 1024
+            except ValueError:
+                continue
+            if p == root:
+                total = n
+                continue
+            prefix = p + "/"
+            while stack and stack[-1][0].startswith(prefix):
+                partial -= stack.pop()[1]
+            stack.append((p, n))
+            partial += n
+        proc.wait()
+    finally:
+        if timer is not None:
+            timer.cancel()
+    if total is not None:
+        return total, None, False
+    return partial, None, True
+
+
+def _walk_size(path: str, deadline: float | None = None) -> tuple[int, int, bool]:
+    """Recursive apparent size of `path`, walked in Python.
 
     Returns (bytes, file_count, truncated). Two things are deliberately not
     followed, both for correctness and for speed:

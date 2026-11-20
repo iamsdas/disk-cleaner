@@ -165,6 +165,9 @@
   .row .size { color: var(--text-2); }
   .row .share { font-weight: 600; }
   .row.dim .name, .row.dim .size, .row.dim .share { color: var(--muted); font-weight: 400; }
+  .row.nav { cursor: pointer; }
+  .row.nav:hover .icon { color: var(--fill); }
+  .hint strong { color: var(--text-2); font-weight: 500; }
 
   /* ---- cleanup list ---- */
   .group-title {
@@ -377,6 +380,7 @@
   const P = {
     tab: () => narrow.matches ? "overview" : fused.params.get("tab") || "overview",
     sel: () => (fused.params.get("sel") || "").split(",").filter(Boolean),
+    path: () => fused.params.get("path") || "~",
   };
   const setParam = (k, v) => fused.params.set(k, String(v));
 
@@ -501,12 +505,17 @@
     const total = opts.total || items.reduce((a, i) => a + i.size, 0) || 1;
     return `<div class="rows">` + items.map((it) => {
       const share = Math.round(it.size / total * 100);
-      const meta = it.files ? it.files.toLocaleString() + " " + (opts.unit || "files") : "empty";
-      return `<div class="row ${it.size ? "" : "dim"}" title="${esc(it.path)}">
-          <span class="icon">▸</span>
+      // du-based sizes carry no file count (files is null), so "empty" only
+      // when there really is nothing.
+      const meta = it.files ? it.files.toLocaleString() + " " + (opts.unit || "files")
+        : it.size ? "" : "empty";
+      const nav = opts.navigate && it.is_dir && !it.other_volume;
+      return `<div class="row ${it.size ? "" : "dim"} ${nav ? "nav" : ""}" title="${esc(it.path)}"
+          ${nav ? `data-open="${esc(it.path)}" role="button" tabindex="0"` : ""}>
+          <span class="icon">${it.is_dir ? "▸" : "·"}</span>
           <span class="name">${esc(it.name)}<span class="meta">${meta}</span></span>
           <span class="bar"><span style="width:${Math.max(2, it.size / max * 100)}%"></span></span>
-          <span class="size">${bytes(it.size)}</span>
+          <span class="size">${it.truncated ? "≥ " : ""}${bytes(it.size)}</span>
           <span class="share" style="color:${shareColor(share)}">${share}%</span>
         </div>`;
     }).join("") + `</div>`;
@@ -614,27 +623,64 @@
   // is independent (a separate, still-blocking call) and shows its own
   // loading state until it resolves, so a slow cache scan never holds up the
   // now-fast folder view.
+  // "~/Work/app" style breadcrumb; every ancestor down to home is clickable.
+  function crumbs(abs, home) {
+    if (!abs.startsWith(home)) return esc(abs);
+    const parts = abs.slice(home.length).split("/").filter(Boolean);
+    let acc = home;
+    const links = [`<button class="link" data-open="~">~</button>`];
+    parts.forEach((p, i) => {
+      acc += "/" + p;
+      links.push(i === parts.length - 1 ? `<strong>${esc(p)}</strong>`
+        : `<button class="link" data-open="${esc(acc)}">${esc(p)}</button>`);
+    });
+    return links.join(" / ");
+  }
+
+  let overviewGen = 0;
   async function renderOverview() {
-    panel.innerHTML = `<div class="card">Listing your home directory…</div>`;
+    const gen = ++overviewGen;
+    const path = P.path();
+    const atHome = path === "~";
+    panel.innerHTML = loadingCard(atHome ? "Listing your home directory…" : `Listing ${path}…`);
     let frame = null;
     let caches = null;
     let dupes = null;
+    let trees = null;
 
     function paint() {
-      const volCard = frame ? hero(frame.volume, caches, dupes) : loadingCard("Loading volume info…");
+      if (gen !== overviewGen) return;   // navigated elsewhere since
+      const volCard = !atHome ? "" : frame ? hero(frame.volume, caches, dupes) : loadingCard("Loading volume info…");
 
-      let foldersCard = `<div class="card">Listing your home directory…</div>`;
+      let foldersCard = loadingCard("Listing…");
       if (frame) {
         const totalKnown = frame.children.reduce((a, c) => a + (c.size || 0), 0);
         const pendingCount = PREVIEW ? 0 : frame.children.filter(c => c.pending).length;
+        const partial = frame.children.some(c => c.truncated);
+        const shown = sortChildren(frame.children).filter(c => !c.pending && c.size > 0).slice(0, atHome ? 10 : 25);
         foldersCard = `
           <div class="card">
-            <h2>Biggest folders in your home directory</h2>
-            <p class="hint">${esc(frame.path)} · ${bytes(totalKnown)} so far${pendingCount ? ` · sizing ${pendingCount} more…` : ""}</p>
-            ${barRows(sortChildren(frame.children).filter(c => !c.pending && c.size > 0).slice(0, 8),
-              { navigate: false, total: totalKnown })}
+            <h2>${atHome ? "Biggest folders in your home directory" : "Biggest items here"}</h2>
+            <p class="hint">${crumbs(frame.path, frame.home)} · ${partial ? "at least " : ""}${bytes(totalKnown)}${pendingCount ? ` so far · sizing ${pendingCount} more…` : ""}
+              · click a folder to look inside</p>
+            ${barRows(shown, { navigate: true, total: totalKnown })}
+            ${partial ? `<p class="note">“≥” sizes ran out of time; open the folder to see what's inside.</p>` : ""}
           </div>`;
       }
+
+      if (!atHome) {
+        if (P.tab() !== "overview") return;
+        panel.innerHTML = foldersCard;
+        return;
+      }
+
+      const treesCard = trees && trees.worktrees.length ? `
+        <div class="card">
+          <h2>Git worktrees</h2>
+          <p class="hint">${trees.worktrees.length} extra checkouts across ${trees.repos.length} repos${trees.size ? ` · ${bytes(trees.size)} measured` : ""}.
+            Agents and tools leave these behind; each one is a full copy of the repo, often with its own dependencies and build output.</p>
+          <p class="note"><button class="link" data-tab-go="worktrees">Review worktrees →</button></p>
+        </div>` : "";
 
       const cachesCard = caches ? `
         <div class="card">
@@ -646,11 +692,18 @@
         </div>` : loadingCard("Measuring caches…");
 
       if (P.tab() !== "overview" && TABS[P.tab()]) return;   // user moved on
-      panel.innerHTML = volCard + foldersCard + cachesCard;
+      panel.innerHTML = volCard + foldersCard + treesCard + cachesCard;
     }
 
+    if (!atHome) {
+      await scanProgressive(path, f => { frame = f; paint(); });
+      return;
+    }
     await Promise.all([
       scanProgressive("~", f => { frame = f; paint(); }),
+      // Listing only (no sizes) — cheap, and the card links to the full tab.
+      PREVIEW ? null : fused.runPython("./worktrees.py", {}, { key: "wt-overview" })
+        .then(t => { trees = t; paint(); }).catch(() => {}),
       cachesProgressive(c => { caches = c; paint(); }),
       // Only a finished earlier scan counts; this tab never starts one.
       dupesResult().then(d => { if (!d.none && d.savings > 0) { dupes = d; paint(); } }).catch(() => {}),
@@ -1185,6 +1238,9 @@
     const go = e.target.closest("[data-tab-go]");
     if (go) return setParam("tab", go.dataset.tabGo);
 
+    const open = e.target.closest("[data-open]");
+    if (open) return setParam("path", open.dataset.open);
+
     if (e.target.closest("[data-refresh-caches]")) {
       cleanData = null;
       return renderClean({ refresh: true });
@@ -1221,6 +1277,11 @@
       dupes.disabled = true;
       return dupesAction(dupes.dataset.dupes);
     }
+  });
+
+  panel.addEventListener("keydown", e => {
+    const open = e.key === "Enter" && e.target.closest(".row[data-open]");
+    if (open) setParam("path", open.dataset.open);
   });
 
   panel.addEventListener("change", e => {
