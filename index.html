@@ -196,6 +196,16 @@
   }
   .risk .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 
+  /* ---- worktrees list ---- */
+  .wrow { grid-template-columns: 20px 1fr 92px; }
+  .wrow .desc { white-space: normal; }
+  .tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 9px; margin-left: 6px;
+         border: 1px solid var(--line); color: var(--text-2); vertical-align: 1px; }
+  .tag.good { border-color: var(--good); color: var(--good); }
+  .tag.warn { border-color: var(--warning); color: var(--warning); }
+  .tag.bad { border-color: var(--critical); color: var(--critical); }
+  .quick { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); }
+
   /* ---- action bar ---- */
   .actions {
     position: sticky; bottom: 0; margin-top: 18px; padding: 12px 14px;
@@ -357,6 +367,7 @@
   <nav id="tabs" role="tablist">
     <button role="tab" data-tab="overview">Overview</button>
     <button role="tab" data-tab="clean">Cleanup</button>
+    <button role="tab" data-tab="worktrees">Worktrees</button>
     <button role="tab" data-tab="dupes">Duplicates</button>
   </nav>
 
@@ -1217,8 +1228,253 @@
     if (P.tab() === "dupes") renderDupes(true);
   }
 
+  // ---- worktrees ---------------------------------------------------------
+  // Every linked git worktree under home (worktrees.py), sized one by one
+  // with size_dir.py, removable in bulk by worktree_job.py. Selection is kept
+  // in memory rather than in `sel`-style params: it is a list of up to a few
+  // hundred long absolute paths, which has no business in the URL.
+  let wtData = null;
+  let wtGen = 0;
+  const wtSel = new Set();
+  const WT_SIZE_AGE = String(7 * 86400);
+  const DAY = 86400;
+
+  function idleFor(w, now) {
+    if (!w.active) return null;
+    return Math.max(0, (now - w.active) / DAY);
+  }
+  function daysLabel(d) {
+    if (d == null) return "";
+    if (d < 1) return "active today";
+    if (d < 14) return `idle ${Math.round(d)} d`;
+    if (d < 60) return `idle ${Math.round(d / 7)} wk`;
+    return `idle ${Math.round(d / 30)} mo`;
+  }
+  const wtSize = w => w.size == null ? (w.pending ? "sizing…" : "—") : (w.truncated ? "≥ " : "") + bytes(w.size);
+  const wtRemovable = w => !w.locked;
+
+  function wtTotals() {
+    const all = wtData.worktrees;
+    const known = all.reduce((a, w) => a + (w.size || 0), 0);
+    const pending = all.filter(w => w.pending).length;
+    const chosen = all.filter(w => wtSel.has(w.path));
+    const selBytes = chosen.reduce((a, w) => a + (w.size || 0), 0);
+    return { known, pending, chosen, selBytes };
+  }
+
+  function wtHint() {
+    const t = wtTotals();
+    return `${wtData.worktrees.length} worktrees across ${wtData.repos.length} repos · ` +
+      `${t.pending ? "at least " : ""}${bytes(t.known)}${t.pending ? ` · sizing ${t.pending} more…` : ""}`;
+  }
+
+  function wtRow(w, now) {
+    const tags = [];
+    if (!w.exists) tags.push(`<span class="tag bad">folder missing</span>`);
+    if (w.locked) tags.push(`<span class="tag bad">locked</span>`);
+    if (w.merged) tags.push(`<span class="tag good">merged into ${esc(wtData.bases[w.repo] || "main")}</span>`);
+    if (w.dirty) tags.push(`<span class="tag warn">${w.dirty} uncommitted</span>`);
+    const idle = daysLabel(idleFor(w, now));
+    return `<div class="crow wrow" data-wt="${esc(w.path)}">
+      <label>
+        <input type="checkbox" data-wtsel="${esc(w.path)}" ${wtSel.has(w.path) ? "checked" : ""} ${wtRemovable(w) ? "" : "disabled"}>
+        <span class="name">
+          <span>${esc(w.name)}${tags.join("")}</span>
+          <div class="desc">${esc(w.branch || "detached HEAD")}${idle ? " · " + idle : ""} · <code>${esc(w.path)}</code></div>
+        </span>
+        <span class="size">${wtSize(w)}</span>
+      </label>
+    </div>`;
+  }
+
+  function buildWtDom() {
+    const now = wtData.now;
+    const byRepo = {};
+    wtData.worktrees.forEach(w => { (byRepo[w.repo] = byRepo[w.repo] || []).push(w); });
+    const groups = wtData.repos.map(r => {
+      const rows = (byRepo[r.path] || []).sort((a, b) =>
+        (b.size ?? -1) - (a.size ?? -1) || (idleFor(b, now) ?? 0) - (idleFor(a, now) ?? 0));
+      return `<div class="group-title">${esc(r.name)} · ${r.count} worktree${r.count === 1 ? "" : "s"}
+          <span style="text-transform:none;font-weight:400">— ${esc(r.path)}</span></div>
+        <div data-group="${esc(r.path)}">${rows.map(w => wtRow(w, now)).join("")}</div>`;
+    }).join("");
+    const t = wtTotals();
+    panel.innerHTML = `
+      ${wtBanner || ""}
+      <div class="card">
+        <h2>Git worktrees</h2>
+        <p class="hint"><span class="wt-totals">${wtHint()}</span> ·
+          <button class="link" data-wt-refresh="1">Rescan</button></p>
+        <p class="note" style="margin-top:0">Extra checkouts that agents and tools leave behind. Removing one deletes the
+          folder only. The branch stays, so <code>git worktree add &lt;dir&gt; &lt;branch&gt;</code> brings it back,
+          and any uncommitted work is saved as a patch first.</p>
+        <div class="quick" style="margin-top:14px">Select:
+          <button class="link" data-wtq="idle14">idle over 2 weeks</button>
+          <button class="link" data-wtq="idle7">idle over 1 week</button>
+          <button class="link" data-wtq="merged">merged</button>
+          <button class="link" data-wtq="clean">no uncommitted work</button>
+          <button class="link" data-wtq="all">all</button>
+          <button class="link" data-wtq="none">none</button>
+        </div>
+        ${groups}
+      </div>
+      <div class="actions">
+        <span class="selected">${t.chosen.length} selected · ${bytes(t.selBytes)}</span>
+        <span class="spacer"></span>
+        <button class="btn danger" data-wt-remove="1" ${t.chosen.length ? "" : "disabled"}>Remove worktrees</button>
+      </div>`;
+  }
+
+  function patchWt() {
+    if (P.tab() !== "worktrees" || !wtData) return;
+    wtData.worktrees.forEach(w => {
+      const row = panel.querySelector(`[data-wt="${CSS.escape(w.path)}"] .size`);
+      if (row) row.textContent = wtSize(w);
+    });
+    const hint = panel.querySelector(".wt-totals");
+    if (hint) hint.textContent = wtHint();
+    panel.querySelectorAll("input[data-wtsel]").forEach(cb => { cb.checked = wtSel.has(cb.dataset.wtsel); });
+    const t = wtTotals();
+    const label = panel.querySelector(".actions .selected");
+    if (label) label.textContent = `${t.chosen.length} selected · ${t.pending && t.chosen.some(w => w.pending) ? "at least " : ""}${bytes(t.selBytes)}`;
+    const btn = panel.querySelector("[data-wt-remove]");
+    if (btn) btn.disabled = !t.chosen.length;
+  }
+
+  async function renderWorktrees(opts) {
+    const refresh = !!(opts && opts.refresh);
+    if (wtData && !refresh && !(opts && opts.reload)) { buildWtDom(); return; }
+    const gen = ++wtGen;
+    panel.innerHTML = loadingCard("Finding git worktrees…");
+    const data = await fused.runPython("./worktrees.py",
+      { details: "true", refresh: String(refresh) }, { key: "wt-list" });
+    if (gen !== wtGen) return;
+    data.bases = Object.fromEntries(data.repos.map(r => [r.path, r.base]));
+    const live = new Set(data.worktrees.map(w => w.path));
+    [...wtSel].forEach(p => { if (!live.has(p)) wtSel.delete(p); });
+    wtData = data;
+    takeWtResult();
+    if (P.tab() === "worktrees") buildWtDom();
+    if (PREVIEW) return;
+
+    // Size the unsized ones, biggest repos first; existing cached sizes stay.
+    const pending = data.worktrees.filter(w => w.exists && (refresh || w.size == null));
+    pending.forEach(w => { w.pending = true; });
+    patchWt();
+    let cursor = 0;
+    async function worker() {
+      while (cursor < pending.length && gen === wtGen) {
+        const w = pending[cursor++];
+        try {
+          const s = await fused.runPython("./size_dir.py",
+            { path: w.path, refresh: String(refresh), max_age: WT_SIZE_AGE }, { key: "wt:" + w.path });
+          Object.assign(w, { size: s.size, truncated: s.truncated });
+        } catch (err) { /* leave unsized */ }
+        w.pending = false;
+        patchWt();
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(6, pending.length) }, worker));
+  }
+
+  function quickSelect(kind) {
+    const now = wtData.now;
+    const pick = {
+      idle14: w => (idleFor(w, now) ?? 0) > 14,
+      idle7: w => (idleFor(w, now) ?? 0) > 7,
+      merged: w => w.merged,
+      clean: w => w.dirty === 0,
+      all: () => true,
+      none: () => false,
+    }[kind];
+    wtSel.clear();
+    wtData.worktrees.filter(w => wtRemovable(w) && pick(w)).forEach(w => wtSel.add(w.path));
+    patchWt();
+  }
+
+  // ---- worktree removal job ----
+  let wtBanner = "";
+  let wtPending = null;
+  let wtWatching = null;
+  const wtJob = (params) => fused.runPython("./worktree_job.py", params, { key: null });
+
+  function takeWtResult() {
+    const job = wtPending;
+    if (!job) return;
+    wtPending = null;
+    wtJob({ action: "ack" }).catch(() => {});
+    const r = job.result;
+    if (!r) {
+      wtBanner = `<div class="banner error"><strong>Worktree removal failed</strong> — ${esc(job.detail || "unknown error")}</div>`;
+      return;
+    }
+    const errs = r.errors.length ? `<details><summary>${r.errors.length} could not be removed</summary>
+        <table class="data">${r.errors.slice(0, 40).map(e => `<tr><td>${esc(e)}</td></tr>`).join("")}</table></details>` : "";
+    const baks = r.backups.length ? `<details><summary>${r.backups.length} had uncommitted work, saved as patches</summary>
+        <table class="data">${r.backups.map(b => `<tr><td><code>${esc(b.patch)}</code></td></tr>`).join("")}</table></details>` : "";
+    wtBanner = `<div class="banner done"><strong>Removed ${r.removed} worktree${r.removed === 1 ? "" : "s"}, freed about ${bytes(r.freed)}.</strong>
+      Branches are kept.${r.remaining ? ` Stopped with ${r.remaining} left.` : ""}${baks}${errs}</div>`;
+  }
+
+  async function watchWtJob(job) {
+    if (wtWatching === job.id) return;
+    wtWatching = job.id;
+    stopClicked = false;
+    const track = fused.trackJob({ id: job.id, title: job.title, kind: "task", unit: "bytes", cancellable: true });
+    const n = job.items.length;
+    showProgress(`Removing ${n} worktree${n === 1 ? "" : "s"}…`);
+    let stopSent = false, failures = 0;
+    for (;;) {
+      const total = job.total ? Math.max(job.total, job.freed) : 0;
+      updateProgress(job.removed / n * 100,
+        `${job.removed} of ${n} removed · ${bytes(job.freed)} freed · ${job.detail || ""}`);
+      if (job.state !== "running") break;
+      track.update({ done: job.freed, total: total || undefined, detail: job.detail });
+      if (!stopSent && (stopClicked || track.cancelRequested)) {
+        stopSent = true;
+        wtJob({ action: "cancel" }).catch(() => {});
+      }
+      await sleep(1000);
+      try { job = await wtJob({ action: "status" }); failures = 0; }
+      catch (err) { if (++failures >= 5) { wtWatching = null; hideProgress(); return; } }
+    }
+    if (job.state === "done") track.finish(job.detail);
+    else if (job.state === "cancelled") track.cancelled();
+    else track.fail(job.detail || "removal failed");
+    wtWatching = null;
+    hideProgress();
+    wtPending = job;
+    wtSel.clear();
+    if (P.tab() === "worktrees") await renderWorktrees({ refresh: false, reload: true });
+  }
+
+  async function removeWorktrees() {
+    const chosen = wtTotals().chosen.filter(wtRemovable);
+    if (!chosen.length) return;
+    const total = chosen.reduce((a, w) => a + (w.size || 0), 0);
+    const dirty = chosen.filter(w => w.dirty);
+    const ok = await showConfirm(
+      `Remove ${chosen.length} worktree${chosen.length === 1 ? "" : "s"}, about ${bytes(total)}?`,
+      chosen.slice(0, 30).map(w => `• ${w.name}  (${w.branch || "detached"})  ${wtSize(w)}`).join("\n") +
+        (chosen.length > 30 ? `\n…and ${chosen.length - 30} more` : "") +
+        `\n\nThe folders are deleted permanently. Branches are kept.` +
+        (dirty.length ? `\n${dirty.length} have uncommitted work; it is saved as a patch in the app's .fused/data/worktree-backups first.` : ""),
+      "Remove");
+    if (!ok) return;
+    let job;
+    try {
+      job = await wtJob({ action: "start", paths: chosen.map(w => w.path).join("\n"), confirm: "true",
+        total, origin: location.origin });
+    } catch (err) {
+      panel.insertAdjacentHTML("afterbegin",
+        `<div class="banner error"><strong>${esc(err.type || "error")}</strong> — ${esc(err.message)}</div>`);
+      return;
+    }
+    watchWtJob(job);
+  }
+
   // ---- routing -----------------------------------------------------------
-  const TABS = { overview: renderOverview, clean: renderClean, dupes: renderDupes };
+  const TABS = { overview: renderOverview, clean: renderClean, worktrees: renderWorktrees, dupes: renderDupes };
 
   async function draw() {
     const tab = TABS[P.tab()] ? P.tab() : "overview";
@@ -1240,6 +1496,11 @@
 
     const open = e.target.closest("[data-open]");
     if (open) return setParam("path", open.dataset.open);
+
+    const wtq = e.target.closest("[data-wtq]");
+    if (wtq) return quickSelect(wtq.dataset.wtq);
+    if (e.target.closest("[data-wt-refresh]")) { wtBanner = ""; return renderWorktrees({ refresh: true }); }
+    if (e.target.closest("[data-wt-remove]")) return removeWorktrees();
 
     if (e.target.closest("[data-refresh-caches]")) {
       cleanData = null;
@@ -1285,6 +1546,11 @@
   });
 
   panel.addEventListener("change", e => {
+    const wbox = e.target.closest("input[data-wtsel]");
+    if (wbox) {
+      wbox.checked ? wtSel.add(wbox.dataset.wtsel) : wtSel.delete(wbox.dataset.wtsel);
+      return patchWt();
+    }
     const box = e.target.closest("input[data-id]");
     if (!box) return;
     const sel = new Set(P.sel());
@@ -1318,6 +1584,13 @@
       if (job.state !== "none" && !job.acked) {
         pendingResult = job;
         if (P.tab() === "clean") { cleanData = null; renderClean(true); }
+      }
+    }).catch(() => {});
+    wtJob({ action: "status" }).then(job => {
+      if (job.state === "running") return watchWtJob(job);
+      if (job.state !== "none" && !job.acked) {
+        wtPending = job;
+        if (P.tab() === "worktrees" && wtData) { takeWtResult(); buildWtDom(); }
       }
     }).catch(() => {});
   }
